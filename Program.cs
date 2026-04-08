@@ -32,12 +32,13 @@ internal static class Program
         var sortByOption            = new Option<string?>("--sort-by",           "Comma-separated column list for ORDER BY (auto-detects primary key if omitted)");
         var nullTextOption          = new Option<string>("--null-text",          () => "<NULL>", "Text representation for NULL values in TSV output");
         var excludeGeneratedOption  = new Option<bool>("--exclude-generated",   () => false, "Exclude identity, serial, and sequence-default columns from output");
+        var includeSystemOption     = new Option<bool>("--include-postgres-system-objects", () => false, "Allow comparing tables in PostgreSQL system schemas (pg_catalog, pg_toast, information_schema, pg_temp)");
 
         var rootCommand = new RootCommand("Compare table content between two PostgreSQL databases and export to TSV files for diff tools.")
         {
             sourceHostOption, sourcePortOption, sourceDatabaseOption, sourceSchemaOption, sourceTableOption, sourceUserOption, sourcePasswordOption,
             targetHostOption, targetPortOption, targetDatabaseOption, targetSchemaOption, targetTableOption, targetUserOption, targetPasswordOption,
-            whereOption, sourceWhereOption, targetWhereOption, outputDirOption, sortByOption, nullTextOption, excludeGeneratedOption
+            whereOption, sourceWhereOption, targetWhereOption, outputDirOption, sortByOption, nullTextOption, excludeGeneratedOption, includeSystemOption
         };
 
         rootCommand.SetHandler(async (context) =>
@@ -79,6 +80,25 @@ internal static class Program
             var sortBy           = context.ParseResult.GetValueForOption(sortByOption);
             var nullText         = context.ParseResult.GetValueForOption(nullTextOption)!;
             var excludeGenerated = context.ParseResult.GetValueForOption(excludeGeneratedOption);
+            var includeSystem    = context.ParseResult.GetValueForOption(includeSystemOption);
+
+            if (!includeSystem)
+            {
+                var systemSchemas = new[] { sourceConfig.Schema, targetConfig.Schema }
+                    .Where(IsSystemSchema)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (systemSchemas.Count > 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.Error.WriteLine($"Error: refusing to compare tables in PostgreSQL system schema(s): {string.Join(", ", systemSchemas)}");
+                    Console.Error.WriteLine("Use --include-postgres-system-objects to override this check.");
+                    Console.ResetColor();
+                    context.ExitCode = 1;
+                    return;
+                }
+            }
 
             context.ExitCode = await RunCompareAsync(sourceConfig, targetConfig, sourceWhere, targetWhere, outputDir, sortBy, nullText, excludeGenerated);
         });
@@ -377,6 +397,22 @@ internal static class Program
         foreach (char c in name)
             sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
         return sb.ToString();
+    }
+
+    private static readonly string[] SystemSchemaPrefixes = ["pg_toast", "pg_temp", "pg_catalog"];
+
+    private static bool IsSystemSchema(string schema)
+    {
+        if (string.Equals(schema, "information_schema", StringComparison.OrdinalIgnoreCase))
+            return true;
+        foreach (var prefix in SystemSchemaPrefixes)
+        {
+            if (string.Equals(schema, prefix, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (schema.StartsWith(prefix + "_", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 }
 
